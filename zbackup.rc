@@ -1,0 +1,85 @@
+#!/bin/sh
+#
+#
+# PROVIDE: zbackup
+# REQUIRE: python3.5
+
+
+. /etc/rc.subr
+
+name=zbackup
+rcvar=zbackup_enable
+command="/usr/local/bin/${name}"
+start_cmd="${name}_start"
+stop_cmd="${name}_stop"
+reload_cmd="${name}_reload"
+list_cmd="${name}_list"
+restart_cmd="${name}_restart"
+extra_commands="list reload"
+status_cmd="${name}_status"
+procname="${command} --daemon -c ${zbackup_config}"
+load_rc_config $name
+: ${zbackup_enable:=no} 
+: ${zbackup_config:='/usr/local/etc/zbackup.conf'}
+
+
+pidfile="/var/run/${name}.pid"
+
+
+zbackup_list()
+{
+    ${command} --list "$1"
+}
+
+zbackup_start()
+{
+    if [ -e ${pidfile} ]; then
+	echo 'zbackup was Already running.'
+    else
+	echo "Starting ${name}"
+	${command} --daemon -c "${zbackup_config}"
+    fi
+}
+
+zbackup_reload()
+{
+    if [ -e ${pidfile} ]; then
+	echo "Reload config"
+	kill -s HUP `cat ${pidfile}`	
+    else
+	echo 'zbackup is not running.'
+    fi
+}
+
+zbackup_stop()
+{
+    if [ -e ${pidfile} ]; then
+	echo "Stopping ${name}"
+	kill -s TERM `cat ${pidfile}`	
+    else
+	echo 'zbackup is not running.'
+    fi
+}
+
+zbackup_restart()
+{
+    echo "Restarting ${name}"
+    zbackup_stop
+    sleep 2
+    zbackup_start
+}
+
+zbackup_status()
+{
+    if [ -e ${pidfile} ]; then
+	pid=`cat ${pidfile}`
+	echo "zbackup is running as ${pid}."
+	return 0
+    else
+	echo 'zbackup is not running.'
+	return 1
+    fi
+}
+
+
+run_rc_command "$@" 

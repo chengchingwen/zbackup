@@ -1,0 +1,303 @@
+#! /usr/local/bin/python3.5 
+import subprocess as sup
+import shlex, sys
+import argparse as arg
+import configparser as Config
+import signal, os
+import atexit
+import asyncio
+import functools
+
+PIDFILE="/var/run/zbackup.pid"
+DEFAULT_CONF = "/usr/local/etc/zbackup.conf"
+MAX_COUNT = 20
+loop = None
+def List(dataset):
+    """List all zfs snapshot of dataset"""
+    try:
+        cmd = "zfs list -r -t snapshot -o name {}".format(dataset)
+        args = shlex.split(cmd)
+        a = sup.check_output(args).decode("utf-8").split('\n')[:-1]
+        if len(a) == 1:
+            print(a[0])
+        else:
+            a[0] = a[0].replace("NAME","Dataset") + "              TIME"
+            for i in range(1,len(a)):
+                k = a[i].split("@")
+                k[1] = " ".join(k[1].split("_"))
+                a[i] = "{0:20s} {1}".format(k[0],k[1])
+            entry = ["ID   "] + [ "%d    " % i for i in range(1,len(a))]
+            for i in range(len(a)):
+                print(entry[i], a[i])
+    except:
+        pass
+
+            
+def create(dataset,t , count):
+    """create zfs snapshot of dataset"""
+    try:
+        cmd = "zfs snapshot {}@{}".format(dataset, t)
+        args = shlex.split(cmd)
+        sup.run(args)
+        cmd = "zfs list -r -t snapshot -o name {}".format(dataset)
+        args = shlex.split(cmd)
+        a = sup.check_output(args).decode("utf-8").split('\n')[1:-1]
+        while len(a) > int(count):
+            delete(dataset, 1)
+            cmd = "zfs list -r -t snapshot -o name {}".format(dataset)
+            args = shlex.split(cmd)
+            a = sup.check_output(args).decode("utf-8").split('\n')[1:-1]
+    except:
+        pass
+    
+def delete(dataset, ID):
+    """delete specific dataset"""
+    try:
+        cmd = "zfs list -r -t snapshot -o name {}".format(dataset)
+        args = shlex.split(cmd)
+        a = sup.check_output(args).decode("utf-8").split('\n')[1:-1]
+        if ID == None:
+            for shot in a:
+                cmd = "zfs destroy {}".format(shot)
+                args = shlex.split(cmd)
+                sup.run(args)
+        else:
+            cmd = "zfs destroy {}".format(a[int(ID)-1])
+            args = shlex.split(cmd)
+            sup.run(args)
+    except:
+        pass
+        
+            
+def create_parser():
+    """create cli parser object for zbackup"""
+    #parser info
+    parser = arg.ArgumentParser(
+        description="zfs  backup, if no addition argument, create snapshot",
+        usage="./zbackup [[--list | --delete] target dataset [ID] | target dataset [rotation count]] | -d  [-c ConfigFile]")
+    
+    #normal mode for default usage
+    normal_mode = parser.add_argument_group()
+    group = normal_mode.add_mutually_exclusive_group()
+    group.add_argument("--delete", dest="func",
+                       default=create, const=delete,
+                       action="store_const", help="delete snapshot")
+    group.add_argument("--list",dest="func",
+                       default=create, const=List,
+                       action="store_const", help="list snapshot")
+
+    #main arugment for default usage
+    normal_mode.add_argument("dataset", nargs="?",
+                             type=str, help="target dataset")
+    normal_mode.add_argument("rotation", nargs="?",
+                             type=int, help="specify ID or rotation number")
+
+    #daemon mode 
+    daemon_mode = parser.add_argument_group()
+    daemon_mode.add_argument("-d" ,"--daemon" ,action="store_true",
+                             default=False, help="start daemon mode")
+    
+    #config path or start at fore ground without daemonlized
+    daemon_mode.add_argument("-c", "--config", nargs="?", action="append",
+                             type=str, default=[DEFAULT_CONF],
+                             help="config file of daemon mode")
+       
+    #parse the atgument
+    argu = parser.parse_args()
+    
+    return argu
+
+
+def daemonlized():
+    """daemonlized the whole program"""
+    
+    WORKDIR='/'
+    UMASK=0
+
+    if os.path.exists(PIDFILE):
+        raise RuntimeError('Already running')
+    
+    if (hasattr(os, "devnull")):
+        REDIRECT_TO = os.devnull
+    else:
+        REDIRECT_TO = "/dev/null"
+    
+    try:
+        pid = os.fork()
+    except OSError as e:
+        raise Exception("%s [%d]" % (e.strerror, e.errno))
+    if (pid == 0):
+        os.setsid()
+        signal.signal(signal.SIGHUP, signal.SIG_IGN)
+        try:
+            pid = os.fork()
+        except OSError as e:
+            raise Exception("%s [%d]" % (e.strerror, e.errno))
+
+        if (pid == 0):
+            os.chdir(WORKDIR)
+            os.umask(UMASK)
+        else:
+            os._exit(0)
+    else:
+        os._exit(0)
+
+    sys.stdout.flush()
+    sys.stderr.flush()
+    si = open(os.devnull, 'r')
+    so = open(os.devnull, 'a+')
+    se = open(os.devnull, 'a+')
+    
+    os.dup2(si.fileno(), sys.stdin.fileno())
+    os.dup2(so.fileno(), sys.stdout.fileno())
+    os.dup2(se.fileno(), sys.stderr.fileno())
+    atexit.register(lambda: os.remove(PIDFILE))
+    with open(PIDFILE,'w') as f:
+        print(os.getpid(),file=f)
+
+
+
+def config(conf):
+    """read the configure file"""
+    
+    cfg = Config.ConfigParser(inline_comment_prefixes={'#', ';'})
+    try:
+        cfg.read(conf)
+    except:
+        raise Exception("file: {} did not exist".format(conf))
+        
+    setting = {}
+    for sect in cfg.sections():
+        setting[sect] = {}
+        for var in cfg[sect]:
+            setting[sect][var] = cfg[sect][var]
+            
+    setting = {key:value["policy"].split('x') for key, value in setting.items() if value.get("enabled")!="no"}
+    return setting
+
+#global variable for arguments
+argu = create_parser()
+
+
+def main():
+    if argu.daemon == False and len(argu.config) == 1:
+        t = sup.check_output(["date", "-u" ,"+%Y-%m-%dT%H:%M:%SZ"]).decode("utf-8")
+        if argu.dataset == None and argu.func == create:
+            return 0
+        elif argu.func == List:
+            target = argu.dataset if argu.dataset != None else ""
+            List(target)
+        elif argu.func == delete:
+            target = argu.dataset
+            ID = argu.rotation if argu.rotation != None else None
+            delete(target, ID)
+        else:
+            rot_c = argu.rotation if argu.rotation != None else MAX_COUNT
+            target = argu.dataset
+            create(target, t, rot_c)
+    else:
+        if argu.daemon:
+            daemonlized()
+            #signal handlers for signal as being daemon
+            signal.signal(signal.SIGCHLD, signal.SIG_IGN) # ignore child 
+            signal.signal(signal.SIGTSTP,signal.SIG_IGN) # ignore tty signals 
+            signal.signal(signal.SIGTTOU,signal.SIG_IGN)
+            signal.signal(signal.SIGTTIN,signal.SIG_IGN)
+
+        setting = config(argu.config[-1] if argu.config[-1]!=None else argu.config[0])
+        tasks = set_schedule(setting)
+
+        global loop
+        loop = asyncio.get_event_loop()
+
+        for signame in ('SIGINT', 'SIGTERM'):
+            loop.add_signal_handler(getattr(signal, signame),
+                                    functools.partial(ask_stop, signame))
+
+        #set signal for reload config
+        signal.signal(signal.SIGHUP, reload)
+        signal.signal(signal.SIGALRM, signal.SIG_IGN)
+
+
+        #start program
+        run()
+
+def stop(signum, frame):
+    '''signal handler for alarm when exiting'''
+    
+    global loop
+    loop.stop()
+    if os.path.exists(PIDFILE):
+        with open(PIDFILE) as f:
+            os.kill(int(f.read()), signal.SIGTERM)
+    else:
+        print('Not running', file=sys.stderr)
+        raise SystemExit(1)
+    
+
+
+def reload(signum, frame):
+    '''signal handler for SIGHUP'''
+    
+    for task in asyncio.Task.all_tasks():
+        task.cancel()
+    setting = config(argu.config[-1])
+    tasks = set_schedule(setting)
+    
+
+
+def ask_stop(signame):
+    '''signal handler for SIGTERM, SIGINT'''
+    
+    print("got signal %s: exit" % signame)
+    for task in asyncio.Task.all_tasks():
+        task.cancel()
+    signal.signal(signal.SIGALRM, stop)
+    signal.alarm(2) #wait for the event loop cancel all the tasks
+    
+def run():
+    global loop
+    try:
+        loop.run_forever()
+    finally:
+        loop.close()
+
+    
+
+def Task(NAME, id, duration):
+    """build async task"""
+    
+    name, dur, ID = NAME, duration, id
+    async def core():
+        while True:
+            nonlocal dur, ID, name
+            print("start schedule for {} with id {} for {}s".format(name, ID, dur))
+            t = sup.check_output(["date", "-u" ,"+%Y-%m-%dT%H:%M:%SZ"]).decode("utf-8")
+            create(name, t, ID)
+            await asyncio.sleep(dur)
+            print("leaving")
+    return core
+
+       
+                
+def set_schedule(setting):
+    """
+    get scheduled of tasks from config file
+    return list of coroutine object
+    """
+    
+    map_time = {'m':60, 'h':60*60, 'd':60*60*24,'w':60*60*24*7}
+    _schedule = []
+    for data, task in setting.items():
+        _schedule.append(( data,  int(task[0]),
+                           int(task[1][:-1]) * map_time[task[1][-1]] ))
+
+    _schedule = sorted( _schedule, key=lambda x: x[2]) #sort by time
+    tasks = [ asyncio.ensure_future(Task(name, id, dur)()) for name, id, dur in _schedule ] 
+    return tasks
+
+
+        
+    
+if __name__ == '__main__':
+    main()
